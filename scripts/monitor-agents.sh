@@ -299,3 +299,44 @@ for task_file in "$TASKS_DIR"/*.json; do
 done
 
 log "====== 监控完成 ======"
+
+# ============================================================
+# 错误分类函数（新增）
+# ============================================================
+classify_error() {
+  local log_file="$1"
+  local error_type="unknown"
+  
+  if [[ ! -f "$log_file" ]]; then
+    echo "log_not_found"
+    return
+  fi
+  
+  local last_errors=$(tail -50 "$log_file" 2>/dev/null)
+  
+  # API/网络错误
+  if echo "$last_errors" | grep -qiE "ETIMEDOUT|ECONNREFUSED|network|timeout|API.*key|401|403"; then
+    echo "network_or_auth"
+    return
+  fi
+  
+  # Agent 走偏/逻辑错误
+  if echo "$last_errors" | grep -qiE "cannot find|undefined|not a function|syntax error|assertion"; then
+    echo "code_error"
+    return
+  fi
+  
+  # Git 操作错误
+  if echo "$last_errors" | grep -qiE "conflict|merge|rebase|push.*failed|git.*error"; then
+    echo "git_error"
+    return
+  fi
+  
+  # 资源不足
+  if echo "$last_errors" | grep -qiE "out of memory|disk full|no space|quota"; then
+    echo "resource_error"
+    return
+  fi
+  
+  echo "unknown"
+}
