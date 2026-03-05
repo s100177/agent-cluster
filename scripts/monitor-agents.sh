@@ -99,6 +99,7 @@ relaunch_agent() {
   branch=$(jq_sanitize_file "$task_file" -r '.branch')
   worktree=$(jq_sanitize_file "$task_file" -r '.worktree')
   agent=$(jq_sanitize_file "$task_file" -r '.agent')
+  model=$(jq_sanitize_file "$task_file" -r '.model // ""')
   description=$(jq_sanitize_file "$task_file" -r '.description')
   repo=$(jq_sanitize_file "$task_file" -r '.repo')
   retries=$(jq_sanitize_file "$task_file" -r '.retries')
@@ -137,11 +138,19 @@ ${failure_context}
   local new_cmd
   case "$agent" in
     claude-code) new_cmd="claude --dangerously-skip-permissions -p $(printf '%q' "$improved_prompt")" ;;
-    codex)       new_cmd="codex -p $(printf '%q' "$improved_prompt")" ;;
+    codex)       new_cmd="codex exec --full-auto -m $(printf '%q' "${model:-gpt-5.3-codex}") $(printf '%q' "$improved_prompt")" ;;
     *)           new_cmd="claude --dangerously-skip-permissions -p $(printf '%q' "$improved_prompt")" ;;
   esac
 
+  # 确保 OPENAI_API_KEY 传进 tmux 会话（tmux server 不一定会同步新环境变量）
+  OPENAI_API_KEY_VALUE="${OPENAI_API_KEY:-}"
+  TMUX_ENV_ARGS=()
+  if [[ -n "$OPENAI_API_KEY_VALUE" ]]; then
+    TMUX_ENV_ARGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY_VALUE")
+  fi
+
   tmux -S /tmp/tmux-1000/default new-session -d -s "$tmux_session" \
+    "${TMUX_ENV_ARGS[@]}" \
     -c "$worktree" \
     "exec bash -c 'echo \"[$(date)] 重试 #$((retries+1)): $description\" | tee -a $log_file; $new_cmd 2>&1 | tee -a $log_file'"
 

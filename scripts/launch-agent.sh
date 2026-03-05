@@ -136,14 +136,16 @@ build_agent_cmd() {
   local worktree="$1"
   local description="$2"
   local agent="$3"
+  local model="$4"
 
   case "$agent" in
     claude-code)
       echo "claude --dangerously-skip-permissions -p $(printf '%q' "$description")"
       ;;
     codex)
-      # codex 不支持 -p 参数，prompt 直接跟在后面
-      echo "codex $(printf '%q' "$description")"
+      # codex 交互模式要求 stdout/stderr 是 TTY；在 tmux 中写日志会 pipe 到 tee，导致
+      # “stdout is not a terminal”。改用 exec 模式避免依赖 TTY。
+      echo "codex exec --full-auto -m $(printf '%q' "$model") $(printf '%q' "$description")"
       ;;
     gemini)
       echo "gemini-cli -p $(printf '%q' "$description")"
@@ -154,15 +156,29 @@ build_agent_cmd() {
   esac
 }
 
-AGENT_CMD=$(build_agent_cmd "$WORKTREE_PATH" "$DESCRIPTION" "$AGENT")
+AGENT_CMD=$(build_agent_cmd "$WORKTREE_PATH" "$DESCRIPTION" "$AGENT" "$MODEL")
 
 # 4. 启动 tmux 会话，在 worktree 目录中运行 Agent
 # 注意：必须 unset CLAUDECODE，否则 claude 拒绝在嵌套会话中启动
 TMUX_SOCKET="/tmp/tmux-$(id -u)/default"
 echo "启动 tmux 会话: $TMUX_SESSION"
-tmux -S "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" \
+
+# 确保 OPENAI_API_KEY 能传进 tmux 会话：
+# - tmux server 可能早就启动了，默认不会自动同步新环境变量
+# - 这里用 new-session -e 显式注入（仅在变量存在时）
+OPENAI_API_KEY_VALUE="${OPENAI_API_KEY:-}"
+TMUX_ENV_ARGS=()
+if [[ -n "$OPENAI_API_KEY_VALUE" ]]; then
+  TMUX_ENV_ARGS+=(-e "OPENAI_API_KEY=$OPENAI_API_KEY_VALUE")
+fi
+
+if ! tmux -S "$TMUX_SOCKET" new-session -d -s "$TMUX_SESSION" \
+  "${TMUX_ENV_ARGS[@]}" \
   -c "$WORKTREE_PATH" \
-  "exec bash -c 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; export PATH=\"$PATH\"; echo \"[$(date)] 启动 Agent: $DESCRIPTION\" | tee -a $LOG_FILE; $AGENT_CMD 2>&1 | tee -a $LOG_FILE; echo \"[$(date)] Agent 退出: \$?\" >> $LOG_FILE'"
+  "exec bash -c 'unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT; export PATH=\"$PATH\"; echo \"[$(date)] 启动 Agent: $DESCRIPTION\" | tee -a $LOG_FILE; $AGENT_CMD 2>&1 | tee -a $LOG_FILE; echo \"[$(date)] Agent 退出: \$?\" >> $LOG_FILE'"; then
+  echo "错误: tmux 会话启动失败（socket: $TMUX_SOCKET, session: $TMUX_SESSION）"
+  exit 1
+fi
 
 echo ""
 echo "Agent 已启动!"
