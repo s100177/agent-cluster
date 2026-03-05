@@ -50,11 +50,15 @@ today = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d")
 
 # 噪音过滤词（这些消息没有业务价值）
 NOISE_PATTERNS = [
-    "Read HEARTBEAT.md if it exists",
+    "Read HEARTBEAT.md",
     "Pre-compaction memory flush",
     "Post-Compaction Audit",
+    "Conversation info (untrusted metadata)",
+    "openclaw system event",
     "HEARTBEAT_OK",
-    "Execute your Session Startup sequence",
+    "System: [",
+    "session was started via /new",
+    "Execute your Session Startup",
 ]
 
 messages = []
@@ -94,18 +98,6 @@ for fname in os.listdir(sessions_dir):
                             text += c.get("text", "")
                 elif isinstance(content, str):
                     text = content
-                
-                # 去掉钉钉 metadata 包装，提取实际指令
-                if "Conversation info (untrusted metadata)" in text:
-                    # 提取 ```json``` 之后的实际用户消息
-                    parts = text.split("```")
-                    if len(parts) >= 3:
-                        text = parts[-1].strip()  # 最后一个代码块之后的内容
-                    else:
-                        # 尝试找 "Sender (untrusted metadata)" 之后的内容
-                        idx = text.find("Sender (untrusted metadata)")
-                        if idx > 0:
-                            text = text[idx:].split("```")[-1].strip() if "```" in text[idx:] else text[idx:].strip()
 
                 if not text.strip():
                     continue
