@@ -1,0 +1,11 @@
+# 运行时文件
+tasks/*.json
+logs/*.log
+worktrees/
+
+# 敏感配置（如需要可手动添加）
+# config.env
+
+# 临时文件
+*.tmp
+.DS_Store

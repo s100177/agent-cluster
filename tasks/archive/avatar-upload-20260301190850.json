@@ -1,0 +1,1 @@
+{"id":"avatar-upload","tmuxSession":"agent-avatar-upload","agent":"claude-code","status":"running","retries":0,"repo":"/home/user/projects/autocode","worktree":"/home/user/projects/agent-cluster/worktrees/avatar-upload","branch":"feat/avatar-upload","startedAt":1772362765536,"prUrl":null,"ciStatus":null,"notifyOnComplete":true}
