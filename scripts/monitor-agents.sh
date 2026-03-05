@@ -9,6 +9,7 @@ CLUSTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TASKS_DIR="$CLUSTER_DIR/tasks"
 LOGS_DIR="$CLUSTER_DIR/logs"
 MAX_RETRIES=3
+MAX_RUN_HOURS=2  # 任务最大运行时长（超过则标记为僵尸任务）
 
 # 钉钉配置
 DINGTALK_WEBHOOK="${DINGTALK_WEBHOOK:-}"
@@ -179,6 +180,26 @@ for task_file in "$TASKS_DIR"/*.json; do
     continue
   fi
 
+
+  # ---- 检查 0: 超时检测（僵尸任务） ----
+  started_at=$(jq -r '.startedAt' "$task_file")
+  now_ms=$(date +%s%3N)
+  elapsed_hours=$(( (now_ms - started_at) / 1000 / 3600 ))
+  
+  if [[ $elapsed_hours -ge $MAX_RUN_HOURS && -z "$pr_url" ]]; then
+    log "  ⚠️ 任务超时 ${elapsed_hours}h（阈值：${MAX_RUN_HOURS}h），标记为僵尸任务"
+    
+    # 归档任务文件
+    archive_name="${task_id}-$(date +%Y%m%d%H%M%S).json"
+    jq '.status = "failed" | .failureReason = "僵尸任务：运行超过 '"${MAX_RUN_HOURS}"' 小时无进展"' "$task_file" > "$CLUSTER_DIR/tasks/archive/$archive_name" 2>/dev/null || true
+    rm "$task_file"
+    
+    send_dingtalk "### ⚠️ 僵尸任务清理\n\n**任务:** $task_id\n\n**描述:** $description\n\n运行 ${elapsed_hours}h 无进展，已自动归档。"
+    log "  已归档为：tasks/archive/$archive_name"
+    continue
+  fi
+  
+  log "  运行时长：${elapsed_hours}h（阈值：${MAX_RUN_HOURS}h）"
   # ---- 检查 1: tmux 会话是否存活 ----
   if ! is_tmux_alive "$tmux_session"; then
     log "  tmux 会话已死亡: $tmux_session"
