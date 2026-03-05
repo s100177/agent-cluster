@@ -131,27 +131,38 @@ PY
 
 echo "任务记录已保存: $TASK_FILE"
 
-# 3. 构建 Agent 启动命令
+# 3. 构建 Agent 启动命令（强制追加 git 提交指令）
 build_agent_cmd() {
   local worktree="$1"
   local description="$2"
   local agent="$3"
   local model="$4"
 
+  # 强制追加 git 提交和推送指令，确保任务完成后一定会提交代码
+  local git_commit_instruction="
+
+【强制要求】任务完成后必须执行：
+1. git add -A
+2. git commit -m \"feat: <任务描述>\"
+3. git push origin $BRANCH
+4. 如果有错误，必须在日志中明确说明原因"
+
+  local full_description="${description}${git_commit_instruction}"
+
   case "$agent" in
     claude-code)
-      echo "claude --dangerously-skip-permissions -p $(printf '%q' "$description")"
+      echo "claude --dangerously-skip-permissions -p $(printf '%q' "$full_description")"
       ;;
     codex)
       # codex 交互模式要求 stdout/stderr 是 TTY；在 tmux 中写日志会 pipe 到 tee，导致
-      # “stdout is not a terminal”。改用 exec 模式避免依赖 TTY。
-      echo "codex exec --full-auto -m $(printf '%q' "$model") $(printf '%q' "$description")"
+      # "stdout is not a terminal"。改用 exec 模式避免依赖 TTY。
+      echo "codex exec --full-auto -m $(printf '%q' "$model") $(printf '%q' "$full_description")"
       ;;
     gemini)
-      echo "gemini-cli -p $(printf '%q' "$description")"
+      echo "gemini-cli -p $(printf '%q' "$full_description")"
       ;;
     *)
-      echo "claude --dangerously-skip-permissions -p $(printf '%q' "$description")"
+      echo "claude --dangerously-skip-permissions -p $(printf '%q' "$full_description")"
       ;;
   esac
 }
