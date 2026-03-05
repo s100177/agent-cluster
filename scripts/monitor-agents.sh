@@ -6,8 +6,9 @@
 set -uo pipefail
 
 CLUSTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-TASKS_DIR="$CLUSTER_DIR/tasks"
-LOGS_DIR="$CLUSTER_DIR/logs"
+TASKS_DIR="${TASKS_DIR_OVERRIDE:-$CLUSTER_DIR/tasks}"
+LOGS_DIR="${LOGS_DIR_OVERRIDE:-$CLUSTER_DIR/logs}"
+source "$CLUSTER_DIR/scripts/lib/json.sh"
 MAX_RETRIES=3
 MAX_RUN_HOURS=2  # 任务最大运行时长（超过则标记为僵尸任务）
 
@@ -51,7 +52,12 @@ update_task() {
   local value="$3"
   local tmp
   tmp=$(mktemp)
-  jq ".$key = $value" "$task_file" > "$tmp" && mv "$tmp" "$task_file"
+  if jq_sanitize_file "$task_file" ".$key = $value" > "$tmp"; then
+    mv "$tmp" "$task_file"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
 }
 
 is_tmux_alive() {
@@ -89,13 +95,13 @@ get_ci_status() {
 relaunch_agent() {
   local task_file="$1"
   local task_id branch worktree agent description repo retries
-  task_id=$(jq -r '.id' "$task_file")
-  branch=$(jq -r '.branch' "$task_file")
-  worktree=$(jq -r '.worktree' "$task_file")
-  agent=$(jq -r '.agent' "$task_file")
-  description=$(jq -r '.description' "$task_file")
-  repo=$(jq -r '.repo' "$task_file")
-  retries=$(jq -r '.retries' "$task_file")
+  task_id=$(jq_sanitize_file "$task_file" -r '.id')
+  branch=$(jq_sanitize_file "$task_file" -r '.branch')
+  worktree=$(jq_sanitize_file "$task_file" -r '.worktree')
+  agent=$(jq_sanitize_file "$task_file" -r '.agent')
+  description=$(jq_sanitize_file "$task_file" -r '.description')
+  repo=$(jq_sanitize_file "$task_file" -r '.repo')
+  retries=$(jq_sanitize_file "$task_file" -r '.retries')
   local log_file="$LOGS_DIR/${task_id}.log"
 
   log "重新启动 Agent: $task_id (第 $((retries+1)) 次重试)"
@@ -119,7 +125,7 @@ ${failure_context}
 
   # 杀死旧会话
   local tmux_session
-  tmux_session=$(jq -r '.tmuxSession' "$task_file")
+  tmux_session=$(jq_sanitize_file "$task_file" -r '.tmuxSession')
   tmux -S /tmp/tmux-1000/default kill-session -t "$tmux_session" 2>/dev/null || true
 
   # 更新任务状态
@@ -162,15 +168,15 @@ fi
 for task_file in "$TASKS_DIR"/*.json; do
   [[ -f "$task_file" ]] || continue
 
-  task_id=$(jq -r '.id' "$task_file")
-  status=$(jq -r '.status' "$task_file")
-  tmux_session=$(jq -r '.tmuxSession' "$task_file")
-  branch=$(jq -r '.branch' "$task_file")
-  worktree=$(jq -r '.worktree' "$task_file")
-  retries=$(jq -r '.retries' "$task_file")
-  pr_url=$(jq -r '.prUrl // ""' "$task_file")
-  description=$(jq -r '.description' "$task_file")
-  notify=$(jq -r '.notifyOnComplete' "$task_file")
+  task_id=$(jq_sanitize_file "$task_file" -r '.id')
+  status=$(jq_sanitize_file "$task_file" -r '.status')
+  tmux_session=$(jq_sanitize_file "$task_file" -r '.tmuxSession')
+  branch=$(jq_sanitize_file "$task_file" -r '.branch')
+  worktree=$(jq_sanitize_file "$task_file" -r '.worktree')
+  retries=$(jq_sanitize_file "$task_file" -r '.retries')
+  pr_url=$(jq_sanitize_file "$task_file" -r '.prUrl // ""')
+  description=$(jq_sanitize_file "$task_file" -r '.description')
+  notify=$(jq_sanitize_file "$task_file" -r '.notifyOnComplete')
 
   log "检查任务: $task_id (状态: $status, 重试: $retries)"
 
@@ -182,7 +188,7 @@ for task_file in "$TASKS_DIR"/*.json; do
 
 
   # ---- 检查 0: 超时检测（僵尸任务） ----
-  started_at=$(jq -r '.startedAt' "$task_file")
+  started_at=$(jq_sanitize_file "$task_file" -r '.startedAt')
   now_ms=$(date +%s%3N)
   elapsed_hours=$(( (now_ms - started_at) / 1000 / 3600 ))
   
@@ -191,11 +197,12 @@ for task_file in "$TASKS_DIR"/*.json; do
     
     # 归档任务文件
     archive_name="${task_id}-$(date +%Y%m%d%H%M%S).json"
-    jq '.status = "failed" | .failureReason = "僵尸任务：运行超过 '"${MAX_RUN_HOURS}"' 小时无进展"' "$task_file" > "$CLUSTER_DIR/tasks/archive/$archive_name" 2>/dev/null || true
+    mkdir -p "$TASKS_DIR/archive" 2>/dev/null || true
+    jq_sanitize_file "$task_file" '.status = "failed" | .failureReason = "僵尸任务：运行超过 '"${MAX_RUN_HOURS}"' 小时无进展"' > "$TASKS_DIR/archive/$archive_name" 2>/dev/null || true
     rm "$task_file"
     
     send_dingtalk "### ⚠️ 僵尸任务清理\n\n**任务:** $task_id\n\n**描述:** $description\n\n运行 ${elapsed_hours}h 无进展，已自动归档。"
-    log "  已归档为：tasks/archive/$archive_name"
+    log "  已归档为：$(basename "$TASKS_DIR")/archive/$archive_name"
     continue
   fi
   

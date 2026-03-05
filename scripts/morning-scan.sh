@@ -8,6 +8,7 @@ set -uo pipefail
 CLUSTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$CLUSTER_DIR/config.env" 2>/dev/null || true
 export PATH="/home/user/.nvm/versions/node/v22.22.0/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+source "$CLUSTER_DIR/scripts/lib/json.sh"
 
 LOG_FILE="$CLUSTER_DIR/logs/morning-scan.log"
 TASKS_DIR="$CLUSTER_DIR/tasks"
@@ -42,7 +43,7 @@ count_running_agents() {
   for f in "$TASKS_DIR"/*.json; do
     [[ -f "$f" ]] || continue
     local s
-    s=$(jq -r '.status' "$f" 2>/dev/null)
+    s=$(jq_sanitize_file "$f" -r '.status' || echo "")
     [[ "$s" == "running" || "$s" == "reviewing" || "$s" == "pr_created" ]] && count=$((count+1))
   done
   echo $count
@@ -53,9 +54,12 @@ count_running_agents() {
 # ============================================================
 task_exists() {
   local task_id="$1"
-  [[ -f "$TASKS_DIR/${task_id}.json" ]] && \
-    [[ "$(jq -r '.status' "$TASKS_DIR/${task_id}.json")" != "done" ]] && \
-    [[ "$(jq -r '.status' "$TASKS_DIR/${task_id}.json")" != "failed" ]]
+  local task_file="$TASKS_DIR/${task_id}.json"
+  [[ -f "$task_file" ]] || return 1
+
+  local status
+  status="$(jq_sanitize_file "$task_file" -r '.status' || echo "")"
+  [[ "$status" != "done" && "$status" != "failed" ]]
 }
 
 log "====== 早间巡检开始 ======"
@@ -167,13 +171,13 @@ NOW_MS=$(date +%s%3N)
 
 for task_file in "$TASKS_DIR"/*.json; do
   [[ -f "$task_file" ]] || continue
-  STATUS=$(jq -r '.status' "$task_file")
+  STATUS=$(jq_sanitize_file "$task_file" -r '.status')
   [[ "$STATUS" != "ready" ]] && continue
 
-  STARTED_AT=$(jq -r '.startedAt' "$task_file")
+  STARTED_AT=$(jq_sanitize_file "$task_file" -r '.startedAt')
   AGE_HOURS=$(( (NOW_MS - STARTED_AT) / 3600000 ))
-  TASK_ID=$(jq -r '.id' "$task_file")
-  PR_URL=$(jq -r '.prUrl // ""' "$task_file")
+  TASK_ID=$(jq_sanitize_file "$task_file" -r '.id')
+  PR_URL=$(jq_sanitize_file "$task_file" -r '.prUrl // ""')
 
   if [[ $AGE_HOURS -gt 24 ]]; then
     STALE_SUMMARY="${STALE_SUMMARY}\n- ${TASK_ID} (等待 ${AGE_HOURS}h) [PR](${PR_URL})"

@@ -8,6 +8,7 @@ CLUSTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TASKS_DIR="$CLUSTER_DIR/tasks"
 ARCHIVE_DIR="$TASKS_DIR/archive"
 LOGS_DIR="$CLUSTER_DIR/logs"
+source "$CLUSTER_DIR/scripts/lib/json.sh"
 
 MODE="${1:---all}"
 case "$MODE" in
@@ -38,7 +39,7 @@ PR_CREATED=0
 shopt -s nullglob
 for f in "$TASKS_DIR"/*.json; do
   TOTAL=$((TOTAL+1))
-  status=$(jq -r '.status' "$f" 2>/dev/null)
+  status=$(jq_sanitize_file "$f" -r '.status')
   case "$status" in
     done) DONE=$((DONE+1)) ;;
     failed) FAILED=$((FAILED+1)) ;;
@@ -49,7 +50,7 @@ done
 
 for f in "$ARCHIVE_DIR"/*.json; do
   TOTAL=$((TOTAL+1))
-  status=$(jq -r '.status' "$f" 2>/dev/null)
+  status=$(jq_sanitize_file "$f" -r '.status')
   case "$status" in
     done) DONE=$((DONE+1)) ;;
     failed) FAILED=$((FAILED+1)) ;;
@@ -83,7 +84,7 @@ OTHER_COUNT=0
 
 shopt -s nullglob
 for f in "$TASKS_DIR"/*.json "$ARCHIVE_DIR"/*.json; do
-  agent=$(jq -r '.agent' "$f" 2>/dev/null)
+  agent=$(jq_sanitize_file "$f" -r '.agent')
   case "$agent" in
     claude-code) CLAUDE_COUNT=$((CLAUDE_COUNT+1)) ;;
     codex) CODEX_COUNT=$((CODEX_COUNT+1)) ;;
@@ -188,10 +189,10 @@ shopt -u nullglob
 if [[ ${#task_files[@]} -gt 0 ]]; then
   for f in $(ls -t "${task_files[@]}" 2>/dev/null | head -5); do
     [[ -f "$f" ]] || continue
-    task_id=$(jq -r '.id' "$f")
-    status=$(jq -r '.status' "$f")
-    agent=$(jq -r '.agent' "$f")
-    desc=$(jq -r '.description' "$f" | head -c 40)
+    task_id=$(jq_sanitize_file "$f" -r '.id')
+    status=$(jq_sanitize_file "$f" -r '.status')
+    agent=$(jq_sanitize_file "$f" -r '.agent')
+    desc=$(jq_sanitize_file "$f" -r '.description' | head -c 40)
     
     case "$status" in
       done) icon="✅" ;;

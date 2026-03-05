@@ -3,6 +3,7 @@
 
 CLUSTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TASKS_DIR="$CLUSTER_DIR/tasks"
+source "$CLUSTER_DIR/scripts/lib/json.sh"
 
 if [[ ! -d "$TASKS_DIR" ]]; then
   echo "没有任务记录"
@@ -24,16 +25,16 @@ echo ""
 for task_file in "$TASKS_DIR"/*.json; do
   [[ -f "$task_file" ]] || continue
 
-  task_id=$(jq -r '.id' "$task_file")
-  status=$(jq -r '.status' "$task_file")
-  agent=$(jq -r '.agent' "$task_file")
-  description=$(jq -r '.description' "$task_file")
-  tmux_session=$(jq -r '.tmuxSession' "$task_file")
-  branch=$(jq -r '.branch' "$task_file")
-  retries=$(jq -r '.retries' "$task_file")
-  pr_url=$(jq -r '.prUrl // "无"' "$task_file")
-  ci_status=$(jq -r '.ciStatus // "未知"' "$task_file")
-  started_at=$(jq -r '.startedAt' "$task_file")
+  task_id=$(jq_sanitize_file "$task_file" -r '.id')
+  status=$(jq_sanitize_file "$task_file" -r '.status')
+  agent=$(jq_sanitize_file "$task_file" -r '.agent')
+  description=$(jq_sanitize_file "$task_file" -r '.description')
+  tmux_session=$(jq_sanitize_file "$task_file" -r '.tmuxSession')
+  branch=$(jq_sanitize_file "$task_file" -r '.branch')
+  retries=$(jq_sanitize_file "$task_file" -r '.retries')
+  pr_url=$(jq_sanitize_file "$task_file" -r '.prUrl // "无"')
+  ci_status=$(jq_sanitize_file "$task_file" -r '.ciStatus // "未知"')
+  started_at=$(jq_sanitize_file "$task_file" -r '.startedAt')
 
   # 状态图标
   case "$status" in

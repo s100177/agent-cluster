@@ -9,6 +9,7 @@ TASKS_DIR="$CLUSTER_DIR/tasks"
 ARCHIVE_DIR="$TASKS_DIR/archive"
 WORKTREES_DIR="$CLUSTER_DIR/worktrees"
 LOGS_DIR="$CLUSTER_DIR/logs"
+source "$CLUSTER_DIR/scripts/lib/json.sh"
 
 DRY_RUN=false
 [[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
@@ -43,7 +44,7 @@ for session in $(tmux -S "$TMUX_SOCKET" list-sessions 2>/dev/null | grep "^agent
   fi
   
   # 检查任务状态
-  status=$(jq -r '.status' "$task_file" 2>/dev/null)
+  status=$(jq_sanitize_file "$task_file" -r '.status')
   if [[ "$status" == "done" || "$status" == "failed" || "$status" == "cancelled" ]]; then
     log "发现已完成任务的 tmux 会话：$session（状态：$status）"
     if [[ "$DRY_RUN" == "false" ]]; then
@@ -122,17 +123,17 @@ SEVEN_DAYS_MS=$((SEVEN_DAYS_AGO * 1000))
 for task_file in "$TASKS_DIR"/*.json; do
   [[ -f "$task_file" ]] || continue
   
-  status=$(jq -r '.status' "$task_file" 2>/dev/null)
+  status=$(jq_sanitize_file "$task_file" -r '.status')
   
   # 只处理已完成/失败的任务
   if [[ "$status" != "done" && "$status" != "failed" ]]; then
     continue
   fi
   
-  started_at=$(jq -r '.startedAt' "$task_file" 2>/dev/null || echo 0)
+  started_at=$(jq_sanitize_file "$task_file" -r '.startedAt' || echo 0)
   
   if [[ $started_at -lt $SEVEN_DAYS_MS && $SEVEN_DAYS_MS -gt 0 ]]; then
-    task_id=$(jq -r '.id' "$task_file")
+    task_id=$(jq_sanitize_file "$task_file" -r '.id')
     log "发现旧任务：$task_id（状态：$status）"
     
     if [[ "$DRY_RUN" == "false" ]]; then

@@ -8,6 +8,7 @@ set -uo pipefail
 CLUSTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$CLUSTER_DIR/config.env" 2>/dev/null || true
 export PATH="/home/user/.nvm/versions/node/v22.22.0/bin:/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+source "$CLUSTER_DIR/scripts/lib/json.sh"
 
 LOG_FILE="$CLUSTER_DIR/logs/evening-scan.log"
 TASKS_DIR="$CLUSTER_DIR/tasks"
@@ -46,10 +47,17 @@ REPOS=()
 [[ -d "/home/user/projects/autocode/.git" ]] && REPOS+=("/home/user/projects/autocode")
 
 # 扫描 agent-cluster worktrees 里出现过的仓库
-if [[ -f "$TASKS_DIR"/*.json ]] 2>/dev/null; then
+shopt -s nullglob
+task_files=("$TASKS_DIR"/*.json)
+shopt -u nullglob
+if [[ ${#task_files[@]} -gt 0 ]]; then
   while IFS= read -r repo; do
     [[ -d "$repo/.git" ]] && REPOS+=("$repo")
-  done < <(jq -r '.repo' "$TASKS_DIR"/*.json 2>/dev/null | sort -u)
+  done < <(
+    for task_file in "${task_files[@]}"; do
+      jq_sanitize_file "$task_file" -r '.repo' || true
+    done | sort -u
+  )
 fi
 
 # 去重
@@ -146,7 +154,7 @@ for item in items:
   # ---- 检查是否已有今日文档更新任务 ----
   TASK_ID="docs-update-${REPO_NAME}-${TODAY}"
   if [[ -f "$TASKS_DIR/${TASK_ID}.json" ]]; then
-    STATUS=$(jq -r '.status' "$TASKS_DIR/${TASK_ID}.json" 2>/dev/null)
+    STATUS=$(jq_sanitize_file "$TASKS_DIR/${TASK_ID}.json" -r '.status' || echo "")
     if [[ "$STATUS" != "done" && "$STATUS" != "failed" ]]; then
       log "今日文档任务已存在（状态: $STATUS），跳过"
       continue

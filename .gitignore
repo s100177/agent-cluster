@@ -1,5 +1,6 @@
 # 运行时文件
 tasks/*.json
+tasks/archive/*.json
 logs/*.log
 worktrees/
 

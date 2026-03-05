@@ -9,6 +9,7 @@ CLUSTER_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TASKS_DIR="$CLUSTER_DIR/tasks"
 WORKTREES_DIR="$CLUSTER_DIR/worktrees"
 LOGS_DIR="$CLUSTER_DIR/logs"
+source "$CLUSTER_DIR/scripts/lib/json.sh"
 
 # 参数
 TASK_ID="${1:-}"
@@ -34,7 +35,7 @@ fi
 
 TASK_FILE="$TASKS_DIR/${TASK_ID}.json"
 if [[ -f "$TASK_FILE" ]]; then
-  STATUS=$(jq -r '.status' "$TASK_FILE")
+  STATUS=$(jq_sanitize_file "$TASK_FILE" -r '.status' || echo "")
   if [[ "$STATUS" == "running" ]]; then
     echo "错误: 任务 $TASK_ID 已在运行中"
     exit 1
@@ -86,26 +87,47 @@ if ! git -C "$REPO_PATH" worktree add "$WORKTREE_PATH" -b "$BRANCH" origin/main 
   fi
 fi
 
-# 2. 记录任务 JSON
-cat > "$TASK_FILE" <<EOF
-{
-  "id": "$TASK_ID",
-  "tmuxSession": "$TMUX_SESSION",
-  "agent": "$AGENT",
-  "model": "$MODEL",
-  "description": "$DESCRIPTION",
-  "repo": "$REPO_PATH",
-  "worktree": "$WORKTREE_PATH",
-  "branch": "$BRANCH",
-  "startedAt": $STARTED_AT,
-  "status": "running",
-  "retries": 0,
-  "prUrl": null,
-  "ciStatus": null,
-  "notifyOnComplete": true,
-  "log": "$LOG_FILE"
+# 2. 记录任务 JSON（用 python 做 JSON 转义，避免控制字符/引号导致 jq 解析失败）
+python3 - "$TASK_FILE" "$TASK_ID" "$TMUX_SESSION" "$AGENT" "$MODEL" "$DESCRIPTION" "$REPO_PATH" "$WORKTREE_PATH" "$BRANCH" "$STARTED_AT" "$LOG_FILE" <<'PY'
+import json
+import sys
+
+(
+    task_file,
+    task_id,
+    tmux_session,
+    agent,
+    model,
+    description,
+    repo,
+    worktree,
+    branch,
+    started_at,
+    log_file,
+) = sys.argv[1:]
+
+data = {
+    "id": task_id,
+    "tmuxSession": tmux_session,
+    "agent": agent,
+    "model": model,
+    "description": description,
+    "repo": repo,
+    "worktree": worktree,
+    "branch": branch,
+    "startedAt": int(started_at),
+    "status": "running",
+    "retries": 0,
+    "prUrl": None,
+    "ciStatus": None,
+    "notifyOnComplete": True,
+    "log": log_file,
 }
-EOF
+
+with open(task_file, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+PY
 
 echo "任务记录已保存: $TASK_FILE"
 
@@ -120,7 +142,8 @@ build_agent_cmd() {
       echo "claude --dangerously-skip-permissions -p $(printf '%q' "$description")"
       ;;
     codex)
-      echo "codex --model $MODEL -p $(printf '%q' "$description")"
+      # codex 不支持 -p 参数，prompt 直接跟在后面
+      echo "codex $(printf '%q' "$description")"
       ;;
     gemini)
       echo "gemini-cli -p $(printf '%q' "$description")"
