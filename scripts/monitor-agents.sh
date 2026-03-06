@@ -60,6 +60,21 @@ update_task() {
   fi
 }
 
+# 安全更新字符串字段（用 --arg 避免 URL/特殊字符破坏 jq 语法）
+update_task_str() {
+  local task_file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp=$(mktemp)
+  if jq --arg val "$value" ".$key = \$val" "$task_file" > "$tmp"; then
+    mv "$tmp" "$task_file"
+  else
+    rm -f "$tmp" 2>/dev/null || true
+    return 1
+  fi
+}
+
 is_tmux_alive() {
   local session="$1"
   tmux -S /tmp/tmux-1000/default has-session -t "$session" 2>/dev/null
@@ -93,7 +108,7 @@ get_ci_status() {
 }
 
 rescue_commit() {
-  # 救援提交：当重试次数用尽后，自动提交 worktree 中已有的修改
+  # 救援提交：当重试次数用尽后，自动提交/推送 worktree 中已有的修改
   local task_file="$1"
   local task_id branch worktree description
   task_id=$(jq_sanitize_file "$task_file" -r '.id')
@@ -108,45 +123,65 @@ rescue_commit() {
     return 1
   fi
 
-  # 检查是否有未提交的修改
+  # 检查未提交的修改
   local changes
   changes=$(git -C "$worktree" status --porcelain 2>/dev/null | wc -l)
 
-  if [[ "$changes" -eq 0 ]]; then
-    log "  没有未提交的修改，跳过救援"
+  # 检查已提交但未推送的 commit（Agent 写完代码提交了，但没 push）
+  local unpushed
+  unpushed=$(git -C "$worktree" log "origin/${branch}..HEAD" --oneline 2>/dev/null | wc -l \
+    || git -C "$worktree" log "origin/main..HEAD" --oneline 2>/dev/null | wc -l \
+    || echo 0)
+  unpushed=$(echo "$unpushed" | tr -d '[:space:]')
+
+  if [[ "$changes" -eq 0 && "$unpushed" -eq 0 ]]; then
+    log "  没有未提交的修改，也没有未推送的 commit，跳过救援"
     return 1
   fi
 
-  log "  发现 $changes 个文件修改，执行救援提交..."
-
-  # 执行救援提交
   cd "$worktree" || return 1
-  git add -A
-  git commit -m "rescue: 自动提交（Agent 重试失败后的救援）
+
+  # 有未提交修改 → 先提交
+  if [[ "$changes" -gt 0 ]]; then
+    log "  发现 $changes 个文件修改，执行救援提交..."
+    git add -A
+    git commit -m "rescue: 自动提交（Agent 重试失败后的救援）
 
 任务：$description
 说明：Agent 多次重试后仍失败，自动保存已有修改以防丢失。"
+  else
+    log "  发现 $unpushed 个未推送 commit，直接推送..."
+  fi
 
   # 推送到远程
   if git push origin "$branch" 2>&1; then
     log "  救援提交已推送"
 
-    # 获取 PR 链接
+    # 创建 PR（可能已存在，加 || true 忽略报错）
     local pr_url
-    pr_url=$(gh pr create --title "rescue: $task_id - 救援提交" --body "这是 Agent 重试失败后的自动救援提交。
+    pr_url=$(gh pr create \
+      --title "rescue: $task_id - 救援提交" \
+      --body "这是 Agent 重试失败后的自动救援提交。
 
 任务描述：$description
 
-请手动审查代码。" --base main --head "$branch" 2>/dev/null | grep -oE 'https://github.com/[^ ]+' || true)
+请手动审查代码。" \
+      --base main --head "$branch" 2>/dev/null \
+      | grep -oE 'https://github\.com/[^ ]+/pull/[0-9]+' || true)
+
+    # 如果 PR 已存在，gh pr create 会报错，改用 gh pr list 查 URL
+    if [[ -z "$pr_url" ]]; then
+      pr_url=$(gh pr list --head "$branch" --json url --jq '.[0].url' 2>/dev/null || true)
+    fi
 
     if [[ -n "$pr_url" ]]; then
-      update_task "$task_file" "prUrl" ""$pr_url""
+      update_task_str "$task_file" "prUrl" "$pr_url"   # 用 --arg 避免 URL 破坏 jq 语法
       log "  PR 已创建：$pr_url"
     fi
 
     return 0
   else
-    log "  推送失败，但本地提交已完成"
+    log "  推送失败"
     return 1
   fi
 }
@@ -173,14 +208,23 @@ relaunch_agent() {
   fi
 
   # 动态调整 prompt（改进版 Ralph Loop 核心）
-  local improved_prompt="$description"
+  local git_mandatory="
+
+【强制要求 - 任务最后必须执行】
+1. git add -A
+2. git commit -m \"feat: ${task_id}\"
+3. git push origin ${branch}
+4. gh pr create --title \"feat: ${task_id}\" --body \"${description}\" --base main --head ${branch}
+不执行以上步骤不算完成任务。"
+
+  local improved_prompt="${description}${git_mandatory}"
   if [[ -n "$failure_context" ]]; then
     improved_prompt="${description}
 
 【上次失败分析】
 ${failure_context}
 
-请特别注意以上错误，避免重复。先确认类型定义和依赖关系，再开始实现。"
+请特别注意以上错误，避免重复。先确认类型定义和依赖关系，再开始实现。${git_mandatory}"
   fi
 
   # 杀死旧会话
@@ -287,17 +331,49 @@ for task_file in "$TASKS_DIR"/*.json; do
     if [[ -n "$pr_url" && "$pr_url" != "null" ]]; then
       log "  找到 PR: $pr_url，Agent 已完成"
       update_task "$task_file" "status" '"pr_created"'
-      update_task "$task_file" "prUrl" "\"$pr_url\""
-    elif [[ "$retries" -lt "$MAX_RETRIES" ]]; then
-      log "  未找到 PR，触发重试 ($retries/$MAX_RETRIES)"
-      relaunch_agent "$task_file"
+      update_task_str "$task_file" "prUrl" "$pr_url"
     else
-      log "  已达最大重试次数，执行救援提交..."
-      
-      # 尝试救援提交（保存已有修改）
-      if rescue_commit "$task_file"; then
-        log "  救援提交成功"
-        send_dingtalk "### ⚠️ Agent 救援提交完成
+      # 检查是否有本地未推送的 commit（Agent 写完代码但没 push 就退出）
+      local unpushed_count=0
+      if [[ -n "$worktree" && -d "$worktree" ]]; then
+        unpushed_count=$(git -C "$worktree" log "origin/${branch}..HEAD" --oneline 2>/dev/null | wc -l \
+          || git -C "$worktree" log "origin/main..HEAD" --oneline 2>/dev/null | wc -l \
+          || echo 0)
+        unpushed_count=$(echo "$unpushed_count" | tr -d '[:space:]')
+      fi
+
+      if [[ "$unpushed_count" -gt 0 ]]; then
+        log "  发现 $unpushed_count 个未推送 commit，直接推送（跳过重试）..."
+        if git -C "$worktree" push origin "$branch" 2>&1; then
+          pr_url=$(gh pr create \
+            --title "feat: $task_id" \
+            --body "任务：$description" \
+            --base main --head "$branch" 2>/dev/null \
+            | grep -oE 'https://github\.com/[^ ]+/pull/[0-9]+' || true)
+          [[ -z "$pr_url" ]] && \
+            pr_url=$(gh pr list --head "$branch" --json url --jq '.[0].url' 2>/dev/null || true)
+          if [[ -n "$pr_url" ]]; then
+            update_task "$task_file" "status" '"pr_created"'
+            update_task_str "$task_file" "prUrl" "$pr_url"
+            log "  PR 已创建：$pr_url"
+          else
+            update_task "$task_file" "status" '"pr_created"'
+            log "  已推送，PR 链接获取失败，请手动创建"
+          fi
+        else
+          log "  推送失败，改为触发重试"
+          relaunch_agent "$task_file"
+        fi
+      elif [[ "$retries" -lt "$MAX_RETRIES" ]]; then
+        log "  未找到 PR，也无本地 commit，触发重试 ($retries/$MAX_RETRIES)"
+        relaunch_agent "$task_file"
+      else
+        log "  已达最大重试次数，执行救援提交..."
+
+        # 尝试救援提交（保存已有修改）
+        if rescue_commit "$task_file"; then
+          log "  救援提交成功"
+          send_dingtalk "### ⚠️ Agent 救援提交完成
 
 **任务:** $task_id
 
@@ -306,16 +382,17 @@ for task_file in "$TASKS_DIR"/*.json; do
 **状态:** 已自动提交并创建 PR
 
 Agent 重试 $MAX_RETRIES 次后仍失败，但已有修改已保存。请手动审查 PR。"
-      else
-        log "  救援提交失败（无修改或推送失败），标记为失败"
-        update_task "$task_file" "status" '"failed"'
-        send_dingtalk "### ❌ Agent 失败
+        else
+          log "  救援提交失败（无修改或推送失败），标记为失败"
+          update_task "$task_file" "status" '"failed"'
+          send_dingtalk "### ❌ Agent 失败
 
 **任务:** $task_id
 
 **描述:** $description
 
 已重试 $MAX_RETRIES 次，请手动处理。"
+        fi
       fi
     fi
     continue

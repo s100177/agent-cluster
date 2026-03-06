@@ -138,14 +138,15 @@ build_agent_cmd() {
   local agent="$3"
   local model="$4"
 
-  # 强制追加 git 提交和推送指令，确保任务完成后一定会提交代码
+  # 强制追加 git 提交和推送指令，确保任务完成后一定会提交代码并建 PR
   local git_commit_instruction="
 
-【强制要求】任务完成后必须执行：
+【强制要求 - 任务最后必须按顺序执行，缺一不可】
 1. git add -A
-2. git commit -m \"feat: <任务描述>\"
-3. git push origin $BRANCH
-4. 如果有错误，必须在日志中明确说明原因"
+2. git commit -m \"feat: ${TASK_ID}\"
+3. git push origin ${BRANCH}
+4. gh pr create --title \"feat: ${TASK_ID}\" --body \"${description}\" --base main --head ${BRANCH}
+不执行以上步骤不算完成任务。如有错误，在日志中明确说明原因。"
 
   local full_description="${description}${git_commit_instruction}"
 
