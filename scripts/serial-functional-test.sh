@@ -7,6 +7,7 @@ REPORT_PATH="$ROOT_DIR/docs/SERIAL_FUNCTIONAL_TEST_REPORT.md"
 TMP_DIR="${TMPDIR:-/tmp}/serial-functional-test"
 RESULTS_FILE="$TMP_DIR/results.tsv"
 RUN_TS="$(date '+%Y-%m-%d %H:%M:%S')"
+HTTP_TEST_MODE=false
 
 mkdir -p "$TMP_DIR"
 mkdir -p "$ROOT_DIR/docs"
@@ -36,6 +37,32 @@ on_exit() {
 
 trap on_exit EXIT
 
+parse_args() {
+  while (($# > 0)); do
+    case "$1" in
+      --http-test)
+        HTTP_TEST_MODE=true
+        shift
+        ;;
+      -h|--help)
+        cat <<'EOF'
+Usage: scripts/serial-functional-test.sh [--http-test]
+
+Options:
+  --http-test   Enable strict HTTP verification mode. In this mode,
+                startup is considered failed when both /health and
+                /openapi.json are not HTTP 200 after service ready.
+EOF
+        exit 0
+        ;;
+      *)
+        echo "Unknown argument: $1" >&2
+        exit 2
+        ;;
+    esac
+  done
+}
+
 status_code() {
   local url="$1"
   local code
@@ -55,15 +82,16 @@ wait_until_ready() {
   local checks=40
 
   for ((i = 1; i <= checks; i++)); do
+    if kill -0 "$pid" 2>/dev/null && rg -q "Uvicorn running" "$log_file" 2>/dev/null; then
+      ready=0
+      break
+    fi
+
     local health
     local openapi
     health="$(status_code "http://127.0.0.1:${port}/health")"
     openapi="$(status_code "http://127.0.0.1:${port}/openapi.json")"
     if [[ "$health" == "200" || "$openapi" == "200" ]]; then
-      ready=0
-      break
-    fi
-    if kill -0 "$pid" 2>/dev/null && rg -q "Uvicorn running on" "$log_file" 2>/dev/null; then
       ready=0
       break
     fi
@@ -82,12 +110,13 @@ record_result() {
   local openapi="$6"
   local metrics="$7"
   local shutdown="$8"
-  local duration="$9"
-  local note="${10}"
+  local result="$9"
+  local duration="${10}"
+  local note="${11}"
 
   note="${note//$'\t'/ }"
   note="${note//$'\n'/ }"
-  echo -e "${suite}\t${worktree}\t${port}\t${startup}\t${health}\t${openapi}\t${metrics}\t${shutdown}\t${duration}\t${note}" >>"$RESULTS_FILE"
+  echo -e "${suite}\t${worktree}\t${port}\t${startup}\t${health}\t${openapi}\t${metrics}\t${shutdown}\t${result}\t${duration}\t${note}" >>"$RESULTS_FILE"
 }
 
 run_suite() {
@@ -104,17 +133,18 @@ run_suite() {
   local openapi="N/A"
   local metrics="N/A"
   local shutdown="PASS"
+  local result="FAIL"
   local note=""
 
   if [[ ! -d "$server_dir" ]]; then
     note="server dir missing: $server_dir"
-    record_result "$suite" "$worktree_rel" "$port" "$startup" "$health" "$openapi" "$metrics" "$shutdown" "0s" "$note"
+    record_result "$suite" "$worktree_rel" "$port" "$startup" "$health" "$openapi" "$metrics" "$shutdown" "$result" "0s" "$note"
     return 1
   fi
 
   if [[ ! -f "$server_dir/app/main.py" ]]; then
     note="missing app/main.py"
-    record_result "$suite" "$worktree_rel" "$port" "$startup" "$health" "$openapi" "$metrics" "$shutdown" "0s" "$note"
+    record_result "$suite" "$worktree_rel" "$port" "$startup" "$health" "$openapi" "$metrics" "$shutdown" "$result" "0s" "$note"
     return 1
   fi
 
@@ -156,28 +186,49 @@ run_suite() {
   end_ts="$(date +%s)"
   local duration="$((end_ts - start_ts))s"
 
-  if [[ -z "$note" && "$startup" == "PASS" ]]; then
-    if [[ "$health" == "ERR" && "$openapi" == "ERR" ]]; then
-      note="startup ok, HTTP probe blocked/unavailable in current env"
+  if [[ "$startup" == "PASS" && "$shutdown" == "PASS" ]]; then
+    if [[ "$health" == "ERR" && "$openapi" == "ERR" && "$metrics" == "ERR" ]]; then
+      result="ENV_LIMITED"
+      if [[ -z "$note" ]]; then
+        note="startup ok, HTTP probe blocked/unavailable in current env"
+      fi
+    elif [[ "$health" == "200" || "$openapi" == "200" ]]; then
+      result="PASS"
+      if [[ -z "$note" ]]; then
+        note="ok"
+      fi
     else
-      note="ok"
+      result="FAIL"
+      if [[ -z "$note" ]]; then
+        note="http endpoint reachable but unexpected status"
+      fi
     fi
+
+    if [[ "$HTTP_TEST_MODE" == "true" && "$health" != "200" && "$openapi" != "200" ]]; then
+      result="FAIL"
+      note="--http-test enabled: /health and /openapi.json both not 200"
+    fi
+  else
+    result="FAIL"
   fi
 
-  record_result "$suite" "$worktree_rel" "$port" "$startup" "$health" "$openapi" "$metrics" "$shutdown" "$duration" "$note"
-  [[ "$startup" == "PASS" && "$shutdown" == "PASS" ]]
+  record_result "$suite" "$worktree_rel" "$port" "$startup" "$health" "$openapi" "$metrics" "$shutdown" "$result" "$duration" "$note"
+  [[ "$result" != "FAIL" ]]
 }
 
 generate_report() {
   local total=0
   local passed=0
+  local env_limited=0
   local failed=0
 
-  while IFS=$'\t' read -r suite worktree port startup health openapi metrics shutdown duration note; do
+  while IFS=$'\t' read -r suite worktree port startup health openapi metrics shutdown result duration note; do
     [[ -z "${suite:-}" ]] && continue
     total=$((total + 1))
-    if [[ "$startup" == "PASS" && "$shutdown" == "PASS" ]]; then
+    if [[ "$result" == "PASS" ]]; then
       passed=$((passed + 1))
+    elif [[ "$result" == "ENV_LIMITED" ]]; then
+      env_limited=$((env_limited + 1))
     else
       failed=$((failed + 1))
     fi
@@ -189,6 +240,7 @@ generate_report() {
     echo "- 生成时间：${RUN_TS}"
     echo "- 执行脚本：\`scripts/serial-functional-test.sh\`"
     echo "- 执行模式：串行（每次仅启动 1 个服务）"
+    echo "- HTTP 测试模式：\`${HTTP_TEST_MODE}\`（默认关闭，\`--http-test\` 开启严格校验）"
     echo "- Browser Use 遥测：\`BROWSERUSE_TELEMETRY=false\`"
     echo "- FastAPI lifespan：\`--lifespan off\`"
     echo
@@ -204,16 +256,17 @@ generate_report() {
     echo "## 汇总"
     echo
     echo "- 总服务数：${total}"
-    echo "- 通过：${passed}"
-    echo "- 失败：${failed}"
+    echo "- 通过（功能正常）：${passed}"
+    echo "- 环境限制（HTTP 不可达）：${env_limited}"
+    echo "- 失败（真实失败）：${failed}"
     echo
     echo "## 明细结果"
     echo
-    echo "| Suite | Worktree | Port | Startup | /health | /openapi.json | /metrics | Shutdown | Duration | Note |"
-    echo "|---|---|---:|---|---:|---:|---:|---|---:|---|"
-    while IFS=$'\t' read -r suite worktree port startup health openapi metrics shutdown duration note; do
+    echo "| Suite | Worktree | Port | Startup | /health | /openapi.json | /metrics | Shutdown | Result | Duration | Note |"
+    echo "|---|---|---:|---|---:|---:|---:|---|---|---:|---|"
+    while IFS=$'\t' read -r suite worktree port startup health openapi metrics shutdown result duration note; do
       [[ -z "${suite:-}" ]] && continue
-      echo "| ${suite} | \`${worktree}\` | ${port} | ${startup} | ${health} | ${openapi} | ${metrics} | ${shutdown} | ${duration} | ${note} |"
+      echo "| ${suite} | \`${worktree}\` | ${port} | ${startup} | ${health} | ${openapi} | ${metrics} | ${shutdown} | ${result} | ${duration} | ${note} |"
     done <"$RESULTS_FILE"
     echo
     echo "## 原始日志"
@@ -224,8 +277,11 @@ generate_report() {
 }
 
 main() {
+  parse_args "$@"
+
   log "开始串行化全功能测试"
   log "强制环境：BROWSERUSE_TELEMETRY=${BROWSERUSE_TELEMETRY}"
+  log "HTTP 测试模式：${HTTP_TEST_MODE}"
 
   local failed_count=0
 
@@ -244,7 +300,7 @@ main() {
     return 1
   fi
 
-  log "测试完成：全部通过"
+  log "测试完成：全部通过（含环境限制项）"
 }
 
 main "$@"
